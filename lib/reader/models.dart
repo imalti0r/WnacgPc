@@ -246,6 +246,9 @@ class AppSettings {
   double fxPhotoSharp; // 照片超分锐化强度 0..1
   double fxPhotoGate; // 噪点保护 0..1（映射 luma 门限 *0.12，越高平坦区越少锐化）
   bool fxNeural; // 神经超分（ONNX 推理；就绪页替代放大着色器，按分类自动选模型）
+  double fxNeuralScale; // 神经超分倍率 0.5..2（1.0=模型原生效果；>1 获得更多细节，上限 12MP）
+  int fxNeuralTile; // 推理分块边长（0=跟随模型默认）；越小显存占用越低但越慢、接缝越多
+  int fxNeuralOverlap; // 分块重叠像素 0..64，越大接缝过渡越平滑但越慢
 
   AppSettings({
     List<String>? libraryRoots,
@@ -264,6 +267,9 @@ class AppSettings {
     this.fxPhotoSharp = 0.3,
     this.fxPhotoGate = 0.25,
     this.fxNeural = false,
+    this.fxNeuralScale = 1.0,
+    this.fxNeuralTile = 0,
+    this.fxNeuralOverlap = 16,
   }) : libraryRoots = libraryRoots ?? [];
 
   Map<String, dynamic> toJson() => {
@@ -283,6 +289,9 @@ class AppSettings {
         'fxPhotoSharp': fxPhotoSharp,
         'fxPhotoGate': fxPhotoGate,
         'fxNeural': fxNeural,
+        'fxNeuralScale': fxNeuralScale,
+        'fxNeuralTile': fxNeuralTile,
+        'fxNeuralOverlap': fxNeuralOverlap,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -304,5 +313,8 @@ class AppSettings {
         fxPhotoSharp: (j['fxPhotoSharp'] as num?)?.toDouble() ?? 0.3,
         fxPhotoGate: (j['fxPhotoGate'] as num?)?.toDouble() ?? 0.25,
         fxNeural: j['fxNeural'] as bool? ?? false,
+        fxNeuralScale: (j['fxNeuralScale'] as num?)?.toDouble() ?? 1.0,
+        fxNeuralTile: (j['fxNeuralTile'] as num?)?.toInt() ?? 0,
+        fxNeuralOverlap: (j['fxNeuralOverlap'] as num?)?.toInt() ?? 16,
       );
 }

@@ -115,6 +115,21 @@ class ReaderStore {
     _save();
   }
 
+  void setFxNeuralScale(double v) {
+    settings.fxNeuralScale = v;
+    _save();
+  }
+
+  void setFxNeuralTile(int v) {
+    settings.fxNeuralTile = v;
+    _save();
+  }
+
+  void setFxNeuralOverlap(int v) {
+    settings.fxNeuralOverlap = v;
+    _save();
+  }
+
   /// 进度 → WnacgPc 阅读历史（原签名增加总页数参数）
   void updateProgress(String mangaId, int ch, int page, [int total = 0]) {
     final item = _item;

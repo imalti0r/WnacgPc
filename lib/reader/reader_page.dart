@@ -266,7 +266,7 @@ class _ReaderPageState extends State<ReaderPage> {
     AppLog.throttled('fx', '参数 a4k=${p.a4k}(s=${p.a4kStrength.toStringAsFixed(2)}/e=${p.a4kEdge.toStringAsFixed(2)}) '
         'fsr=${p.fsr}(${p.fsrScale.toStringAsFixed(1)}x/r=${p.rcas.toStringAsFixed(2)}) '
         'photo=${p.photo}(${p.photoScale.toStringAsFixed(1)}x/r=${p.photoSharp.toStringAsFixed(2)}/g=${p.photoGate.toStringAsFixed(2)}) '
-        'neural=${p.neural}');
+        'neural=${p.neural}(${p.neuralScale.toStringAsFixed(2)}x/t=${p.neuralTile}/o=${p.neuralOverlap})');
     final s = widget.store;
     s.setFxA4k(p.a4k);
     s.setFxA4kStrength(p.a4kStrength);
@@ -279,7 +279,22 @@ class _ReaderPageState extends State<ReaderPage> {
     s.setFxPhotoSharp(p.photoSharp);
     s.setFxPhotoGate(p.photoGate);
     s.setFxNeural(p.neural);
-    if (p.neural && !wasNeural) _kickSr();
+    s.setFxNeuralScale(p.neuralScale);
+    s.setFxNeuralTile(p.neuralTile);
+    s.setFxNeuralOverlap(p.neuralOverlap);
+    // 神经超分参数（开关/倍率/分块/重叠）变化：丢弃已出的 SR 纹理并重算当前屏，
+    // 磁盘缓存按参数键自动分离，无需清理。
+    final srChanged = p.neural != wasNeural ||
+        p.neuralScale != _fx.neuralScale ||
+        p.neuralTile != _fx.neuralTile ||
+        p.neuralOverlap != _fx.neuralOverlap;
+    if (srChanged) {
+      for (final img in _srImages.values) {
+        img.dispose();
+      }
+      _srImages.clear();
+      _kickSr();
+    }
   }
 
   void _showFxSheet() {
@@ -802,7 +817,11 @@ class _ReaderPageState extends State<ReaderPage> {
 
   ui.Image? _srFor(int i) => _srImages[i];
 
-  String _srCacheName(int i) => i.toString().padLeft(5, '0');
+  /// 磁盘缓存键含神经网络超分参数（倍率/分块/重叠），任一改动即换新键——旧键自然失效，
+  /// 免于清目录（陈旧文件最终由缓存容量清理回收）。
+  String _srCacheName(int i) =>
+      '${i.toString().padLeft(5, '0')}_s${_fx.neuralScale.toStringAsFixed(1)}'
+      '_t${_fx.neuralTile == 0 ? 'm' : _fx.neuralTile}_o${_fx.neuralOverlap}';
 
   void _storeSr(int i, ui.Image img) {
     _srImages[i] = img;
@@ -865,9 +884,11 @@ class _ReaderPageState extends State<ReaderPage> {
     final cap = _cappedDecodeSize(src.width.round(), src.height.round());
     if (cap != null) src = Size(cap.$1.toDouble(), cap.$2.toDouble());
     final model = SrModel.pickFor(widget.manga.categoryIds);
-    final needW = mq.size.width * mq.devicePixelRatio * 1.25;
-    final needH = mq.size.height * mq.devicePixelRatio * 1.25;
-    var tw = math.min(src.width * model.expectedScale, needW).round();
+    // 倍率系数同时放大"源侧目标"与"视口细节上限"：1.0=原生效果；>1 换更多细节（仍受 12MP 钳制）。
+    final mult = _fx.neuralScale.clamp(0.5, 2.0);
+    final needW = mq.size.width * mq.devicePixelRatio * 1.25 * mult;
+    final needH = mq.size.height * mq.devicePixelRatio * 1.25 * mult;
+    var tw = (math.min(src.width * model.expectedScale * mult, needW)).round();
     var th = (tw * src.height / src.width).round();
     if (th > needH) {
       th = needH.round();
@@ -880,8 +901,14 @@ class _ReaderPageState extends State<ReaderPage> {
       th = (th * f).round();
     }
     if (tw <= src.width || th <= src.height || tw < 16 || th < 16) return;
-    final r = await SrEngine.instance
-        .upscale(model: model, srcBytes: b, targetW: tw, targetH: th);
+    final r = await SrEngine.instance.upscale(
+      model: model,
+      srcBytes: b,
+      targetW: tw,
+      targetH: th,
+      tile: _fx.neuralTile == 0 ? null : _fx.neuralTile,
+      overlap: _fx.neuralOverlap,
+    );
     if (!mounted || gen != _prefetchGen || !identical(pages, _pages)) {
       r?.image.dispose();
       return;

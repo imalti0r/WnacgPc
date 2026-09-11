@@ -48,7 +48,7 @@ class FxPanel extends StatelessWidget {
           value: params.neural,
           onChanged: (v) => _set(params.copyWith(neural: v)),
         ),
-        if (params.neural)
+        if (params.neural) ...[
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Row(
@@ -73,6 +73,33 @@ class FxPanel extends StatelessWidget {
               ],
             ),
           ),
+          // ---------- 神经超分可调参数（模型为 2x/4x 同栈：1.0=模型原生倍率，>1 允许拿更多细节，上限 12MP） ----------
+          _slider(
+            label: '超分倍率',
+            value: params.neuralScale,
+            min: 0.5,
+            max: 2.0,
+            valueText: '${params.neuralScale.toStringAsFixed(1)}x',
+            onChanged: (v) => _set(params.copyWith(neuralScale: v)),
+          ),
+          _tileDropdown(params),
+          _slider(
+            label: '分块重叠',
+            value: params.neuralOverlap.toDouble(),
+            min: 0,
+            max: 64,
+            valueText: '${params.neuralOverlap} px',
+            onChanged: (v) =>
+                _set(params.copyWith(neuralOverlap: v.round())),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 0, 0, 4),
+            child: Text(
+              '调参后当前页会自动重新推理（磁盘缓存按参数分开保存，旧结果保留）。',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.outline),
+            ),
+          ),
+        ],
         const Divider(height: 20),
         // ---------- 照片超分（照片向，与 FSR 互斥） ----------
         SwitchListTile(
@@ -154,6 +181,30 @@ class FxPanel extends StatelessWidget {
         Text(
           '处理在 GPU 上逐页进行；滤镜纹理分辨率高于屏幕，双页/缩放时可见额外细节。神经超分逐页后台推理，完成即自动换图。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.outline),
+        ),
+      ],
+    );
+  }
+
+  /// 分块边长下拉：0=跟随模型默认（动漫 512 / 照片 256）；越小显存越省但越慢、接缝越多。
+  Widget _tileDropdown(FxParams params) {
+    return Row(
+      children: [
+        SizedBox(width: 76, child: Text('分块大小', style: const TextStyle(fontSize: 13))),
+        Expanded(
+          child: DropdownButtonFormField<int>(
+            initialValue: params.neuralTile,
+            isDense: true,
+            decoration: const InputDecoration(border: UnderlineInputBorder(), isDense: true),
+            items: [
+              for (final t in const [0, 256, 384, 512, 768, 1024])
+                DropdownMenuItem(
+                  value: t,
+                  child: Text(t == 0 ? '跟随模型' : '$t px', style: const TextStyle(fontSize: 13)),
+                ),
+            ],
+            onChanged: (v) => v == null ? null : _set(params.copyWith(neuralTile: v)),
+          ),
         ),
       ],
     );

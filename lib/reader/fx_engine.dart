@@ -23,6 +23,9 @@ class FxParams {
     required this.photoSharp,
     required this.photoGate,
     this.neural = false,
+    this.neuralScale = 1.0,
+    this.neuralTile = 0,
+    this.neuralOverlap = 16,
   });
 
   factory FxParams.fromSettings(AppSettings s) => FxParams(
@@ -37,6 +40,9 @@ class FxParams {
         photoSharp: s.fxPhotoSharp,
         photoGate: s.fxPhotoGate,
         neural: s.fxNeural,
+        neuralScale: s.fxNeuralScale,
+        neuralTile: s.fxNeuralTile,
+        neuralOverlap: s.fxNeuralOverlap,
       );
 
   final bool a4k;
@@ -54,6 +60,11 @@ class FxParams {
   // 神经超分（ONNX 推理，SR 就绪页跳过放大着色器防双重放大）。
   // 不与 fsr/photo 互斥：未就绪页仍走现有着色器路径（渐进式替换）。
   final bool neural;
+  // 神经超分可调参数：scale 为输出倍率系数（1.0=模型原生），tile 为推理分块边长
+  //（0=模型默认），overlap 为分块重叠像素；改动即清空 SR 缓存重新推理。
+  final double neuralScale;
+  final int neuralTile;
+  final int neuralOverlap;
 
   bool get enabled => a4k || fsr || photo || neural;
 
@@ -73,6 +84,9 @@ class FxParams {
     double? photoSharp,
     double? photoGate,
     bool? neural,
+    double? neuralScale,
+    int? neuralTile,
+    int? neuralOverlap,
   }) =>
       FxParams(
         a4k: a4k ?? this.a4k,
@@ -86,6 +100,9 @@ class FxParams {
         photoSharp: photoSharp ?? this.photoSharp,
         photoGate: photoGate ?? this.photoGate,
         neural: neural ?? this.neural,
+        neuralScale: neuralScale ?? this.neuralScale,
+        neuralTile: neuralTile ?? this.neuralTile,
+        neuralOverlap: neuralOverlap ?? this.neuralOverlap,
       );
 
   @override
@@ -101,11 +118,14 @@ class FxParams {
       other.photoScale == photoScale &&
       other.photoSharp == photoSharp &&
       other.photoGate == photoGate &&
-      other.neural == neural;
+      other.neural == neural &&
+      other.neuralScale == neuralScale &&
+      other.neuralTile == neuralTile &&
+      other.neuralOverlap == neuralOverlap;
 
   @override
   int get hashCode => Object.hash(a4k, a4kStrength, a4kEdge, fsr, fsrScale, rcas, photo,
-      photoScale, photoSharp, photoGate, neural);
+      photoScale, photoSharp, photoGate, neural, neuralScale, neuralTile, neuralOverlap);
 }
 
 class FxEngine {

@@ -127,6 +127,8 @@ class SrEngine {
     required Uint8List srcBytes,
     required int targetW,
     required int targetH,
+    int? tile,
+    int? overlap,
   }) async {
     try {
       await ensureInit();
@@ -152,8 +154,8 @@ class SrEngine {
         'model': model.id,
         'inW': inW,
         'inH': inH,
-        'tile': model.tile,
-        'overlap': model.overlap,
+        'tile': tile ?? model.tile,
+        'overlap': overlap ?? model.overlap,
         'in': rgba,
       }, _runTimeout);
       if (reply == null || reply['err'] != null) {
