@@ -23,9 +23,11 @@ struct SrSessionInfo {
 SR_EXPORT int sr_init(const wchar_t* ortDllPath);
 
 // 由模型字节创建会话。useDml!=0 时追加 DirectML EP(设备0)，失败由调用方改走 CPU 重试。
-// 成功返回 0 并填充 outInfo（含实测 scale 与输入元素类型）。
+// warmTile/warmOverlap > 0 时创建后热身一次 (tile+2*ov)² interior shape（把 DML
+// plan 编译成本从首页预取挪到启动 warm 时段；传 0 跳过）。成功返回 0 并填充 outInfo
+//（含实测 scale 与输入元素类型）。
 SR_EXPORT int sr_create_session(const uint8_t* modelData, int64_t modelLen, int useDml,
-                                SrSessionInfo* outInfo);
+                                SrSessionInfo* outInfo, int warmTile, int warmOverlap);
 
 SR_EXPORT void sr_release_session(SrSessionInfo* info);
 

@@ -37,10 +37,10 @@ final class SrSessionInfo extends Struct {
 typedef _SrInitNative = Int32 Function(Pointer<Utf16> ortPath);
 typedef _SrInitDart = int Function(Pointer<Utf16> ortPath);
 
-typedef _SrCreateSessionNative = Int32 Function(
-    Pointer<Uint8> modelData, Int64 modelLen, Int32 useDml, Pointer<SrSessionInfo> out);
-typedef _SrCreateSessionDart = int Function(
-    Pointer<Uint8> modelData, int modelLen, int useDml, Pointer<SrSessionInfo> out);
+typedef _SrCreateSessionNative = Int32 Function(Pointer<Uint8> modelData, Int64 modelLen,
+    Int32 useDml, Pointer<SrSessionInfo> out, Int32 warmTile, Int32 warmOverlap);
+typedef _SrCreateSessionDart = int Function(Pointer<Uint8> modelData, int modelLen,
+    int useDml, Pointer<SrSessionInfo> out, int warmTile, int warmOverlap);
 
 typedef _SrReleaseNative = Void Function(Pointer<SrSessionInfo> info);
 typedef _SrReleaseDart = void Function(Pointer<SrSessionInfo> info);
@@ -74,8 +74,8 @@ class SrShim {
   int init(Pointer<Utf16> ortPath) => _init(ortPath);
 
   int createSession(Pointer<Uint8> modelData, int modelLen, int useDml,
-          Pointer<SrSessionInfo> out) =>
-      _createSession(modelData, modelLen, useDml, out);
+          Pointer<SrSessionInfo> out, int warmTile, int warmOverlap) =>
+      _createSession(modelData, modelLen, useDml, out, warmTile, warmOverlap);
 
   void releaseSession(Pointer<SrSessionInfo> info) => _releaseSession(info);
 

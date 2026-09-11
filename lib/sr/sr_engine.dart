@@ -14,6 +14,9 @@ import 'sr_shim_ffi.dart';
 enum SrDevice { unavailable, directml, cpu }
 
 /// 模型注册表。scale/输入元素类型由会话探针实测（见 sr_shim.cpp），此处仅承载静态配置。
+/// tile 均值偏大（1024/512）：per-tile 固定开销 ~25ms（调度+D2H 拷贝回读），
+/// 拟真 3.15MP 实测 tile 512→1024 动漫 479→281ms（-41%）、照片 256→512 1500→871ms；
+/// 低显存设备可在 FX 面板把分块调小。会话创建时以 (tile+2ov)² 热身预编译 DML plan。
 class SrModel {
   final String id;
   final String asset;
@@ -24,10 +27,10 @@ class SrModel {
       {this.expectedScale = 2});
 
   static const anime = SrModel(
-      'anime', 'assets/sr_models/2x_AnimeJaNai_HD_V3.1_Balanced.onnx', 512, 16,
+      'anime', 'assets/sr_models/2x_AnimeJaNai_HD_V3.1_Balanced.onnx', 1024, 16,
       expectedScale: 2);
   static const photo =
-      SrModel('photo', 'assets/sr_models/realesr-general-x4v3.onnx', 256, 16,
+      SrModel('photo', 'assets/sr_models/realesr-general-x4v3.onnx', 512, 16,
           expectedScale: 4);
 
   /// 写真&Cosplay（站点分类 3）用照片模型，其余用动漫模型。
@@ -305,7 +308,10 @@ class SrEngine {
     if (c == null) {
       c = Completer<Map>();
       _pendingSessions[model.id] = c;
-      _toWorker?.send({'op': 'session', 'model': model.id, 'bytes': bytes});
+      _toWorker?.send({
+        'op': 'session', 'model': model.id, 'bytes': bytes,
+        'tile': model.tile, 'ov': model.overlap, // 建会话热身 interior shape 用
+      });
     }
     // 并发调用者共用同一 completer：此前第二个调用会覆盖第一个的等待器并
     // 重复发请求，先到者挂到 60s 超时（预热与首页预取并发时的真实竞态）。
@@ -380,11 +386,14 @@ void _workerMain(Map init) {
   final sessions = <String, ffi.Pointer<SrSessionInfo>>{};
 
   // 会话创建：返回 (会话指针, 失败原因)。指针为 nullptr 表示失败。
-  (ffi.Pointer<SrSessionInfo>, String) createSession(Uint8List bytes, int dml) {
+  // warmTile/warmOverlap>0 时建会话后热身一次 interior shape（把 DML plan
+  // 编译成本从首页预取挪到启动 warm）。
+  (ffi.Pointer<SrSessionInfo>, String) createSession(Uint8List bytes, int dml,
+      int warmTile, int warmOv) {
     final p = malloc<ffi.Uint8>(bytes.length);
     p.asTypedList(bytes.length).setAll(0, bytes);
     final info = malloc<SrSessionInfo>();
-    final rc = shim!.createSession(p, bytes.length, dml, info);
+    final rc = shim!.createSession(p, bytes.length, dml, info, warmTile, warmOv);
     malloc.free(p);
     if (rc != 0) {
       final err = shim.lastErrorText;
@@ -401,6 +410,8 @@ void _workerMain(Map init) {
         case 'session':
           final id = m['model'] as String;
           final bytes = m['bytes'] as Uint8List;
+          final warmTile = (m['tile'] as num?)?.toInt() ?? 0;
+          final warmOv = (m['ov'] as num?)?.toInt() ?? 0;
           if (sessions.containsKey(id)) {
             final scale = sessions[id]!.ref.scale;
             mainPort.send({'op': 'session', 'model': id, 'scale': scale});
@@ -409,7 +420,7 @@ void _workerMain(Map init) {
           ffi.Pointer<SrSessionInfo> info = ffi.nullptr;
           var err = '';
           if (!deviceDecided || useDml) {
-            (info, err) = createSession(bytes, 1);
+            (info, err) = createSession(bytes, 1, warmTile, warmOv);
             if (info != ffi.nullptr) {
               deviceDecided = true;
               useDml = true;
@@ -418,7 +429,7 @@ void _workerMain(Map init) {
           }
           if (info == ffi.nullptr && (!deviceDecided || !useDml)) {
             final dmlErr = err;
-            (info, err) = createSession(bytes, 0);
+            (info, err) = createSession(bytes, 0, warmTile, warmOv);
             if (info != ffi.nullptr) {
               deviceDecided = true;
               useDml = false;

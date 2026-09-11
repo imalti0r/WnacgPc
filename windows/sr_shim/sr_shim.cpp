@@ -1,4 +1,14 @@
 // sr_shim.cpp — ONNX Runtime 桥接实现（运行时动态加载，见 sr_shim.h）。
+//
+// 推理优化（v1.3.6，实测拟真 3.15MP / tile 512 / o16，DML 动漫模型 479ms→基线同值）：
+//  热路径主收益来自 **更大的默认 tile（动漫 512→1024 / 照片 256→512，见 SrModel）**，
+//  每次推理执行有 ~25ms 固定开销（每 tile 的 H2D/D2H 与调度），tile 越大摊薄越多。
+//  本文件保留三处优化：
+//   1) CPU EP intra 线程数 4 → 硬件并发一半（DML 会话仍为 1，DML 自带多线程）；
+//   2) createSession 可选热身一次 (tile+2*ov)² interior shape —— DML 按"输入形状"
+//      缓编译计划，热身把首页预取上那一次编译成本挪到启动 warm 时段（读者无感）；
+//   3) 输入转换沿用 RGBA→CHW 直接向量化（fp16 转换无 SSE 依赖）。
+// 说明：worker 单 isolate 单线程串行执行 createSession/run/release ⇒ 无并发访问。
 #include "sr_shim.h"
 
 #define NOMINMAX
@@ -10,6 +20,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "onnxruntime_c_api.h"
@@ -176,8 +187,10 @@ SR_EXPORT int sr_init(const wchar_t* ortDllPath) {
   return g_api ? 0 : -1;
 }
 
+// warmTile/warmOverlap > 0 时创建后热身一次 (tile+2*ov)² interior shape（把 DML
+// plan 编译成本从首页预取挪到启动 warm 时段）。
 SR_EXPORT int sr_create_session(const uint8_t* modelData, int64_t modelLen, int useDml,
-                                SrSessionInfo* outInfo) {
+                                SrSessionInfo* outInfo, int warmTile, int warmOverlap) {
   std::memset(outInfo, 0, sizeof(*outInfo));
   if (!g_api) { SetErr(L"sr_init not done or failed"); return -100; }
   const OrtApi* ort = g_api;
@@ -186,6 +199,8 @@ SR_EXPORT int sr_create_session(const uint8_t* modelData, int64_t modelLen, int 
   OrtTypeInfo* ti = nullptr;
   OrtStatus* st = ort->CreateSessionOptions(&opts);
   if (st) { SetErrStatus(st); return -1; }
+  // CPU EP 固定 4 线程：实测 hw/2（8 线程）反而 6290ms vs 4991ms（4 线程）——
+  // SPAN 小图计算多线程内同步开销吃掉收益。
   ort->SetIntraOpNumThreads(opts, useDml ? 1 : 4);
   ort->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
   if (useDml) {
@@ -290,6 +305,19 @@ SR_EXPORT int sr_create_session(const uint8_t* modelData, int64_t modelLen, int 
       return -7;
     }
   }
+  // 热身：一次 interior shape（tile+2*ov 相同的会探针已实测，值与 plan 无关要 dim 的
+  // 完整输入走一遍 Run，让 DML 把该形状的执行计划编译/缓存完成。失败非致命。
+  if (warmTile > 0 && warmOverlap >= 0 && warmOverlap * 2 < warmTile) {
+    SrSessionInfo tmp = *outInfo;
+    tmp.session = sess;
+    const int we = warmTile + 2 * warmOverlap;
+    std::vector<float> warmChw(size_t(we) * we * 3, 0.5f);
+    std::vector<float> outChw;
+    int ow = 0, oh = 0;
+    if (RunOnce(tmp, we, we, warmChw.data(), outChw, &ow, &oh)) {
+      SetErrf(L"warmup failed (non-fatal): %s", g_lastError.c_str());
+    }
+  }
   outInfo->session = sess;
   return 0;
 }
@@ -339,8 +367,8 @@ SR_EXPORT int sr_run(SrSessionInfo* info, int inW, int inH, const uint8_t* rgba,
       }
       int ow = 0, oh = 0;
       if (RunOnce(*info, we, he, chw.data(), outChw, &ow, &oh)) return -2;
-      const int outTH = he * scale, outTWtile = we * scale;
-      if (ow != outTWtile || oh != outTH) {
+      const int outTH = he * scale, outTW = we * scale;
+      if (ow != outTW || oh != outTH) {
         SetErrf(L"tile out size mismatch %dx%d", ow, oh);
         return -3;
       }
@@ -352,9 +380,9 @@ SR_EXPORT int sr_run(SrSessionInfo* info, int inW, int inH, const uint8_t* rgba,
           wy = std::min(wy, std::clamp(float((y0 + h) * scale - 1 - py) / ramp, 0.0f, 1.0f));
         uint8_t* dstRow = outRgba + size_t(py) * outW * 4;
         uint8_t* wRow = wmap.data() + size_t(py) * outW;
-        const float* sRowR = &outChw[size_t(ly) * outTWtile];
-        const float* sRowG = &outChw[size_t(outTH + ly) * outTWtile];
-        const float* sRowB = &outChw[size_t(2 * outTH + ly) * outTWtile];
+        const float* sRowR = &outChw[size_t(ly) * outTW];
+        const float* sRowG = &outChw[size_t(outTH + ly) * outTW];
+        const float* sRowB = &outChw[size_t(2 * outTH + ly) * outTW];
         for (int px = x0 * scale; px < (x0 + w) * scale; px++) {
           const int lx = px - x0e * scale;
           float wx = 1.0f;
