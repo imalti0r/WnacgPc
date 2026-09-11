@@ -26,14 +26,16 @@ import '../net/image_bridge.dart';
 import '../sr/sr_engine.dart';
 import '../state/app_store.dart';
 
-/// 解码上限：本站存在 11656×8742 一类的超大扫描图，全尺寸解码单张就吃
+/// 解码策略：原图直出——常规图片一律按原始尺寸解码，仅超大扫描图按上限
+/// 同比缩小。本站存在 11656×8742 一类的超大扫描图，全尺寸解码单张就吃
 /// ~400MB 纹理，FX 1.6x 上采样后输出纹理再上 GB，连续分配会把系统内存
-/// 打穿（应用+整机卡死，2026-09-07 实测事故）。显示端 4K 屏也只需 ~8MP，
-/// 限到 12MP、长边 8192（Skia 纹理上限内）对阅读清晰度无感。
+/// 打穿（应用+整机卡死，2026-09-07 实测事故）。限到 12MP、长边 8192
+/// （Skia 纹理上限内）是唯一的缩放规则，其余任何情况都不动原图。
 const int _maxDecodePixels = 12 * 1000 * 1000;
 const int _maxDecodeEdge = 8192;
 
 /// 计算受限解码尺寸（宽高同比缩，不失真）；无需限制时返回 null。
+/// 仅对超过上限的"超大图"返回非 null——这是阅读器唯一的解码缩放点。
 (int, int)? _cappedDecodeSize(int w, int h) {
   double s = 1.0;
   final edge = w > h ? w : h;
@@ -1830,7 +1832,6 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     BoxFit fit = BoxFit.contain,
     double? w,
     double? h,
-    int? cacheWidth,
     bool useSr = true,
   }) {
     // 神经超分就绪：直接出 SR 纹理并跳过放大着色器（防双重放大）。
@@ -1839,7 +1840,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
       if (sr != null) {
         return _wrapPane(
             _fxImage(pageIdx,
-                preset: sr, fit: fit, w: w, h: h, cacheWidth: cacheWidth, skipUpscale: true),
+                preset: sr, fit: fit, w: w, h: h, skipUpscale: true),
             pageIdx);
       }
     }
@@ -1847,7 +1848,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     final preset = widget.presetFor(pageIdx);
     if (preset != null) {
       return _wrapPane(
-          _fxImage(pageIdx, preset: preset, fit: fit, w: w, h: h, cacheWidth: cacheWidth),
+          _fxImage(pageIdx, preset: preset, fit: fit, w: w, h: h),
           pageIdx);
     }
     return FutureBuilder<Uint8List>(
@@ -1869,8 +1870,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
           );
         }
         return _wrapPane(
-            _fxImage(pageIdx,
-                bytes: snap.data!, fit: fit, w: w, h: h, cacheWidth: cacheWidth),
+            _fxImage(pageIdx, bytes: snap.data!, fit: fit, w: w, h: h),
             pageIdx);
       },
     );
@@ -1882,7 +1882,6 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     BoxFit? fit,
     double? w,
     double? h,
-    int? cacheWidth,
     bool skipUpscale = false,
   }) {
     return _FxImage(
@@ -1893,7 +1892,6 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
       fit: fit,
       width: w,
       height: h,
-      cacheWidth: cacheWidth,
       skipUpscale: skipUpscale,
     );
   }
@@ -1918,7 +1916,6 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
 
   Widget _buildFit(BuildContext context, bool ctrl) {
     final dual = widget.pages.length == 2;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
     final ordered = _ordered;
 
     if (widget.fit == PageFit.fitWidth) {
@@ -1930,7 +1927,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
             body = SingleChildScrollView(
               // 放大后拖拽交给 InteractiveViewer 平移，不再滚动内嵌视图
               physics: _zoom ? const NeverScrollableScrollPhysics() : null,
-              child: _pane(context, ordered[0], fit: BoxFit.fitWidth, w: w, cacheWidth: (w * dpr).round()),
+              child: _pane(context, ordered[0], fit: BoxFit.fitWidth, w: w),
             );
           } else {
             // 双页：每页占一半宽度，页间无间距
@@ -1944,7 +1941,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
                     for (final i in ordered)
                       SizedBox(
                         width: w / 2,
-                        child: _pane(context, i, fit: BoxFit.fitWidth, w: w / 2, cacheWidth: ((w / 2) * dpr).round()),
+                        child: _pane(context, i, fit: BoxFit.fitWidth, w: w / 2),
                       ),
                   ],
                 ),
@@ -2028,10 +2025,10 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
         );
       }
       // 尺寸未就绪：先按适应屏幕显示
-      return _containView(context, ctrl, dual, ordered, dpr);
+      return _containView(context, ctrl, dual, ordered);
     }
 
-    return _containView(context, ctrl, dual, ordered, dpr);
+    return _containView(context, ctrl, dual, ordered);
   }
 
   /// 统一的可缩放容器：Ctrl 按住时允许 Ctrl+滚轮缩放。
@@ -2045,7 +2042,7 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     );
   }
 
-  Widget _containView(BuildContext context, bool ctrl, bool dual, List<int> ordered, double dpr) {
+  Widget _containView(BuildContext context, bool ctrl, bool dual, List<int> ordered) {
     return GestureDetector(
       onDoubleTapDown: (d) => _doubleTapPos = d.localPosition,
       onDoubleTap: _handleDoubleTap,
@@ -2067,13 +2064,13 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           for (final i in ordered)
-                            _pane(context, i, fit: BoxFit.fitHeight, h: cons.maxHeight, cacheWidth: 1100),
+                            _pane(context, i, fit: BoxFit.fitHeight, h: cons.maxHeight),
                         ],
                       ),
                     );
                   },
                 )
-              : _pane(context, ordered[0], fit: BoxFit.contain, cacheWidth: 2200),
+              : _pane(context, ordered[0], fit: BoxFit.contain),
         ),
       ),
     );
@@ -2145,7 +2142,6 @@ class _WebtoonViewState extends State<_WebtoonView> {
 
   @override
   Widget build(BuildContext context) {
-    final dpr = MediaQuery.devicePixelRatioOf(context);
     // 神经超分就绪：直接出 SR 纹理并跳过放大着色器。
     final sr = widget.srFor(widget.index);
     if (sr != null) {
@@ -2196,7 +2192,6 @@ class _WebtoonViewState extends State<_WebtoonView> {
                     onDecoded: (img) => widget.onDecoded(widget.index, img),
                     fx: widget.fx,
                     fit: BoxFit.fill,
-                    cacheWidth: (iw * dpr).round(),
                   ),
                 ),
               ),
@@ -2259,7 +2254,6 @@ class _FxImage extends StatefulWidget {
     this.fit,
     this.width,
     this.height,
-    this.cacheWidth,
     this.skipUpscale = false,
   });
 
@@ -2272,7 +2266,6 @@ class _FxImage extends StatefulWidget {
   final BoxFit? fit;
   final double? width;
   final double? height;
-  final int? cacheWidth;
 
   @override
   State<_FxImage> createState() => _FxImageState();
@@ -2358,25 +2351,15 @@ class _FxImageState extends State<_FxImage> {
   Future<void> _resolve() async {
     final bytes = widget.bytes;
     if (bytes == null) return;
-    // 先用头部解析拿原图尺寸，超大扫描图按上限缩小解码（防止 GB 级纹理）
-    int? tw = widget.cacheWidth;
-    int? th;
+    // 原图直出：按头部解析的原尺寸解码；仅超大图被 _cappedDecodeSize 缩小
+    // （防 GB 级纹理）。不再按视口缩放——fit 模式只管布局，不动解码尺寸。
+    (int, int)? cap;
     final sniffed = sniffImageSize(bytes);
-    if (sniffed != null) {
-      final w = sniffed.width.round();
-      final h = sniffed.height.round();
-      if (w > 0 && h > 0) {
-        var capW = w, capH = h;
-        if (tw != null) capH = (h * tw / w).round();
-        final cap = _cappedDecodeSize(capW, capH);
-        if (cap != null) {
-          tw = cap.$1;
-          th = cap.$2;
-        }
-      }
+    if (sniffed != null && sniffed.width > 0 && sniffed.height > 0) {
+      cap = _cappedDecodeSize(sniffed.width.round(), sniffed.height.round());
     }
-    final codec =
-        await ui.instantiateImageCodec(bytes, targetWidth: tw, targetHeight: th);
+    final codec = await ui.instantiateImageCodec(bytes,
+        targetWidth: cap?.$1, targetHeight: cap?.$2);
     final frame = await codec.getNextFrame();
     final img = frame.image;
     codec.dispose();
