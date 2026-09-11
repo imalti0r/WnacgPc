@@ -56,6 +56,28 @@ Size? sniffImageSize(Uint8List b) {
   return null;
 }
 
+/// 从文件头部魔数判定编码格式（判定规则与 sniffImageSize 同源）。
+String sniffImageFormat(Uint8List b) {
+  if (b.length < 12) return '未知';
+  if (b[0] == 0xFF && b[1] == 0xD8) return 'JPEG';
+  if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return 'PNG';
+  if (_startsWith(b, 0, 'GIF8')) return 'GIF';
+  if (b[0] == 0x42 && b[1] == 0x4D) return 'BMP';
+  // WebP: RIFF....WEBP，fourcc 细分有损/无损/扩展
+  if (_startsWith(b, 0, 'RIFF') && _startsWith(b, 8, 'WEBP')) {
+    if (b.length < 16) return 'WebP';
+    switch (String.fromCharCodes(b.sublist(12, 16))) {
+      case 'VP8 ':
+        return 'WebP（有损）';
+      case 'VP8L':
+        return 'WebP（无损）';
+      default:
+        return 'WebP（扩展）';
+    }
+  }
+  return '未知';
+}
+
 Size? _webp(Uint8List b) {
   final fourcc = String.fromCharCodes(b.sublist(12, 16));
   if (fourcc == 'VP8 ') {

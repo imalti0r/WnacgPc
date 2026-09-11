@@ -829,6 +829,80 @@ class _ReaderPageState extends State<ReaderPage> {
     if (mounted) setState(() {});
   }
 
+  /// 右键页面 → 图片信息菜单：源/显示分辨率、编码格式、文件大小与码率、
+  /// 超分模式与超分后分辨率。sync 数据即时可得；字节未命中内存缓存时补拉 2s。
+  Future<void> _showImageInfo(int i, Offset screenPos) async {
+    AppLog.i('ui', '右键图片信息 p$i');
+    var sr = _srImages[i];
+    final preset = _decoded[i];
+    final srcSize = _sizes[i];
+    Uint8List? bytes = _cache[i];
+    if (bytes == null) {
+      try {
+        bytes = await _loadBytes(i).timeout(const Duration(seconds: 2));
+      } catch (_) {
+        bytes = null;
+      }
+      sr = _srImages[i]; // 拉字节期间推理可能已就绪
+    }
+    final device = SrEngine.instance.device;
+    final rows = <String>['页面：第 ${i + 1} 页'];
+    if (srcSize != null && srcSize.width > 0 && srcSize.height > 0) {
+      rows.add('源分辨率：${srcSize.width.round()}×${srcSize.height.round()}');
+      final bpp = bytes != null ? bytes.length * 8 / (srcSize.width * srcSize.height) : null;
+      rows.add('文件大小：${bytes == null ? '未知' : _fmtBytes(bytes.length)}'
+          '${bpp == null ? '' : ' · 码率≈${bpp.toStringAsFixed(2)} bpp'}');
+    } else if (bytes != null) {
+      rows.add('文件大小：${_fmtBytes(bytes.length)}');
+    }
+    rows.add('编码格式：${bytes == null ? '未知' : sniffImageFormat(bytes)}');
+    if (preset != null) {
+      final capped = srcSize != null &&
+          (preset.width < srcSize.width.round() || preset.height < srcSize.height.round());
+      rows.add('显示分辨率：${preset.width}×${preset.height}${capped ? '（受限解码）' : ''}');
+    }
+    // 超分模式：SR 纹理已显示（含磁盘缓存命中）> 原始大小禁用 > 排队中 > 着色器 > 关闭。
+    if (sr != null) {
+      final dev = device == SrDevice.directml ? 'DirectML' : 'CPU';
+      rows.add('超分模式：神经超分（$dev）');
+      rows.add('超分后分辨率：${sr.width}×${sr.height}');
+    } else if (_fit == PageFit.original) {
+      rows.add(_fx.neural ? '超分模式：神经超分 · 原始大小模式禁用' : '超分模式：未启用');
+    } else if (_fx.neural && device != SrDevice.unavailable) {
+      final dev = device == SrDevice.directml ? 'DirectML' : 'CPU';
+      rows.add('超分模式：神经超分（$dev）· 推理排队中，就绪后自动换图');
+    } else {
+      final shader = _fx.fsr ? 'FSR' : _fx.photo ? '照片' : null;
+      rows.add('超分模式：${shader == null ? '未启用' : '着色器（$shader）'}'
+          '${_fx.neural ? ' · 神经超分引擎不可用' : ''}');
+    }
+
+    if (!mounted) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    await showMenu<void>(
+      context: context,
+      position: RelativeRect.fromRect(
+        overlay.localToGlobal(screenPos) & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      elevation: 6,
+      items: [
+        for (final r in rows)
+          PopupMenuItem<void>(
+            enabled: false,
+            height: 30,
+            child: Text(r, style: const TextStyle(fontSize: 12.5)),
+          ),
+      ],
+    );
+  }
+
+  static String _fmtBytes(int n) {
+    if (n >= (1 << 20)) return '${(n / (1 << 20)).toStringAsFixed(2)} MB';
+    if (n >= 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    return '$n B';
+  }
+
   /// 神经开关切换（或预取未覆盖的时机）后补排当前屏。
   void _kickSr() {
     if (!_fx.neural) return;
@@ -1337,6 +1411,7 @@ class _ReaderPageState extends State<ReaderPage> {
                   presetFor: _presetFor,
                   onDecoded: _onDecoded,
                   srFor: _srFor,
+                  onImageInfo: (i, pos) => _showImageInfo(i, pos),
                 ),
               ),
             ),
@@ -1373,6 +1448,7 @@ class _ReaderPageState extends State<ReaderPage> {
                 ctrlDown: _ctrlDown,
                 fx: _fx,
                 srFor: _srFor,
+                onImageInfo: (i, pos) => _showImageInfo(i, pos),
               );
             },
           ),
@@ -1573,6 +1649,7 @@ class _GroupView extends StatefulWidget {
     required this.presetFor,
     required this.onDecoded,
     required this.srFor,
+    required this.onImageInfo,
     required this.zoomed,
     required this.ctrlDown,
     required this.fx,
@@ -1591,6 +1668,8 @@ class _GroupView extends StatefulWidget {
 
   /// 神经超分纹理（就绪时优先于 preset 显示，跳过放大着色器）。
   final ui.Image? Function(int index) srFor;
+  /// 右键页面 → 显示图片信息菜单（页索引 + 全局屏幕坐标）。
+  final void Function(int index, Offset pos) onImageInfo;
   final ValueNotifier<bool> zoomed;
   final ValueListenable<bool> ctrlDown;
   final FxParams fx;
@@ -1710,15 +1789,18 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     if (useSr) {
       final sr = widget.srFor(pageIdx);
       if (sr != null) {
-        return _wrapPane(_fxImage(pageIdx,
-            preset: sr, fit: fit, w: w, h: h, cacheWidth: cacheWidth, skipUpscale: true));
+        return _wrapPane(
+            _fxImage(pageIdx,
+                preset: sr, fit: fit, w: w, h: h, cacheWidth: cacheWidth, skipUpscale: true),
+            pageIdx);
       }
     }
     // 已有解码纹理：同步渲染，避免 FutureBuilder/解码占位帧（翻页闪烁的根源）。
     final preset = widget.presetFor(pageIdx);
     if (preset != null) {
-      return _wrapPane(_fxImage(pageIdx,
-          preset: preset, fit: fit, w: w, h: h, cacheWidth: cacheWidth));
+      return _wrapPane(
+          _fxImage(pageIdx, preset: preset, fit: fit, w: w, h: h, cacheWidth: cacheWidth),
+          pageIdx);
     }
     return FutureBuilder<Uint8List>(
       future: _futures[pageIdx],
@@ -1738,8 +1820,10 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
             ),
           );
         }
-        return _wrapPane(_fxImage(pageIdx,
-            bytes: snap.data!, fit: fit, w: w, h: h, cacheWidth: cacheWidth));
+        return _wrapPane(
+            _fxImage(pageIdx,
+                bytes: snap.data!, fit: fit, w: w, h: h, cacheWidth: cacheWidth),
+            pageIdx);
       },
     );
   }
@@ -1766,8 +1850,8 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
     );
   }
 
-  Widget _wrapPane(Widget child) {
-    return Listener(
+  Widget _wrapPane(Widget child, int pageIdx) {
+    var body = Listener(
       // 抢在内层 SingleChildScrollView 之前注册 pointerSignalResolver，
       // 使滚轮不再滚动内嵌视图，统一交给外层翻页 / Ctrl+滚轮缩放。
       onPointerSignal: (e) {
@@ -1776,6 +1860,11 @@ class _GroupViewState extends State<_GroupView> with TickerProviderStateMixin {
         }
       },
       child: child,
+    );
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapUp: (d) => widget.onImageInfo(pageIdx, d.globalPosition),
+      child: body,
     );
   }
 
@@ -1955,6 +2044,7 @@ class _WebtoonView extends StatefulWidget {
     required this.presetFor,
     required this.onDecoded,
     required this.srFor,
+    required this.onImageInfo,
   });
 
   final int index;
@@ -1971,6 +2061,9 @@ class _WebtoonView extends StatefulWidget {
   /// 神经超分纹理（就绪时优先显示，跳过放大着色器）。
   final ui.Image? Function(int index) srFor;
 
+  /// 右键页面 → 显示图片信息菜单（页索引 + 全局屏幕坐标）。
+  final void Function(int index, Offset pos) onImageInfo;
+
   /// 画质增强参数。
   final FxParams fx;
 
@@ -1980,6 +2073,15 @@ class _WebtoonView extends StatefulWidget {
 
 class _WebtoonViewState extends State<_WebtoonView> {
   late Future<(Uint8List, double)> _f;
+
+  /// 右键图片区域 → 页面信息菜单。
+  Widget _wrapInfo(Widget child) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapUp: (d) => widget.onImageInfo(widget.index, d.globalPosition),
+      child: child,
+    );
+  }
 
   @override
   void initState() {
@@ -2029,7 +2131,7 @@ class _WebtoonViewState extends State<_WebtoonView> {
               iw = w;
               ih = iw / aspect;
             }
-            return Listener(
+            return _wrapInfo(Listener(
               onPointerSignal: (e) {
                 // 按住 Ctrl 时抢先注册 resolver，阻止内层列表滚轮滚动，
                 // 让外层 InteractiveViewer 完成缩放；不按 Ctrl 时列表正常滚动。
@@ -2050,7 +2152,7 @@ class _WebtoonViewState extends State<_WebtoonView> {
                   ),
                 ),
               ),
-            );
+            ));
           },
         );
       },
@@ -2058,7 +2160,7 @@ class _WebtoonViewState extends State<_WebtoonView> {
   }
 
   Widget _body(ui.Image preset, double aspect, {bool sr = false}) {
-    return LayoutBuilder(
+    return _wrapInfo(LayoutBuilder(
       builder: (context, cons) {
         final w = cons.maxWidth;
         var ih = widget.screenH;
@@ -2089,7 +2191,7 @@ class _WebtoonViewState extends State<_WebtoonView> {
           ),
         );
       },
-    );
+    ));
   }
 }
 

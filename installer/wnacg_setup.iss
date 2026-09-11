@@ -2,7 +2,7 @@
 ; 编译: ISCC.exe installer\wnacg_setup.iss
 
 #define MyAppName "WNACG"
-#define MyAppVersion "1.3.4"
+#define MyAppVersion "1.3.5"
 #define MyAppPublisher "WNACG"
 #define MyAppExeName "WNACG.exe"
 
