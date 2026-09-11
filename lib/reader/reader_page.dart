@@ -182,8 +182,6 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 神经超分结果纹理（按页索引）：所有权归本表，与 _decoded 互不重叠——
   /// SR 在树时 pane 直接用 SR 图并跳过放大着色器（不写入 _decoded）。
   final Map<int, ui.Image> _srImages = {};
-  /// SR 串行链：prefetch 每页字节到手后追加任务，与 _prefetchGen 对齐作废。
-  Future<void> _srChain = Future<void>.value();
 
   /// 双页分组列表实例池：内容不变时复用同一 List 实例，
   /// 让 _GroupView.didUpdateWidget 的 identical 判断成立、保留子树状态。
@@ -282,7 +280,7 @@ class _ReaderPageState extends State<ReaderPage> {
     s.setFxNeuralScale(p.neuralScale);
     s.setFxNeuralTile(p.neuralTile);
     s.setFxNeuralOverlap(p.neuralOverlap);
-    // 神经超分参数（开关/倍率/分块/重叠）变化：丢弃已出的 SR 纹理并重算当前屏，
+    // 超分参数（开关/倍率/分块/重叠）变化：丢弃已出的 SR 纹理并重算当前屏，
     // 磁盘缓存按参数键自动分离，无需清理。
     final srChanged = p.neural != wasNeural ||
         p.neuralScale != _fx.neuralScale ||
@@ -293,6 +291,7 @@ class _ReaderPageState extends State<ReaderPage> {
         img.dispose();
       }
       _srImages.clear();
+      _srQueue.clear(); // 旧参数的任务作废，按新参数重排当前屏
       _kickSr();
     }
   }
@@ -915,13 +914,55 @@ class _ReaderPageState extends State<ReaderPage> {
       idx.add(_page);
     }
     for (final i in idx) {
-      _srChain = _srChain.then((_) => _srTask(i));
+      _requestSr(i, null, boost: true);
     }
+  }
+
+  /// SR 工作队列：LIFO（最近激励优先）。快速翻页/连翻时每页都会入队，串行 worker
+  /// 每页推理若干秒，旧任务的"队尾当前页"会饿死（右键永远"排队中"的真实案例）——
+  /// LIFO + 上限 12 页丢弃，保证"正在看的页最先推理"，走丢的放进预取再补。
+  /// 复用 Map 兼作去重与暂存字节（bytes 为 null 时任务自取 _loadBytes）。
+  final Map<int, Uint8List?> _srQueue = {};
+  bool _srBusy = false;
+
+  /// 当前激励：把页 i 放到队尾（队尾=最先出队）；[boost] 且已在队时移到队尾抢占。
+  void _requestSr(int i, Uint8List? b, {bool boost = false}) {
+    if (!_fx.neural) return;
+    Uint8List? memo = b;
+    if (_srQueue.containsKey(i)) {
+      memo = _srQueue.remove(i) ?? b;
+    }
+    if (_srImages[i] != null) return;
+    _srQueue[i] = memo;
+    _pumpSr();
+  }
+
+  void _pumpSr() {
+    if (!_fx.neural) {
+      _srQueue.clear();
+      return;
+    }
+    while (_srQueue.length > 12) {
+      final oldest = _srQueue.keys.first;
+      _srQueue.remove(oldest);
+      AppLog.throttled('fx', '[sr] 队列饱和,丢弃最老任务 p$oldest');
+    }
+    if (_srBusy || _srQueue.isEmpty) return;
+    final i = _srQueue.keys.last;
+    final b = _srQueue.remove(i);
+    _srBusy = true;
+    AppLog.throttled('fx', '[sr] 任务启动 p$i(队列剩余${_srQueue.length})');
+    _srTask(i, b).whenComplete(() {
+      _srBusy = false;
+      if (mounted) _pumpSr();
+    });
   }
 
   void _enqueueSr(int i, Uint8List b) {
     if (!_fx.neural) return;
-    _srChain = _srChain.then((_) => _srTask(i, b));
+    // 已成品/已在队列：不动排队；否则入队（bytes 一并暂存）
+    if (_srQueue.containsKey(i) || _srImages[i] != null) return;
+    _requestSr(i, b);
   }
 
   /// 单页 SR：磁盘缓存 → 推理 → 落盘。任何一步失败静默（继续走现有着色器）。
@@ -975,6 +1016,8 @@ class _ReaderPageState extends State<ReaderPage> {
       th = (th * f).round();
     }
     if (tw <= src.width || th <= src.height || tw < 16 || th < 16) return;
+    // 参数签名在任务启动时固定：推理期间用户改参 → 结果直接丢弃（键已换）。
+    final paramKey = _srCacheName(i);
     final r = await SrEngine.instance.upscale(
       model: model,
       srcBytes: b,
@@ -988,6 +1031,11 @@ class _ReaderPageState extends State<ReaderPage> {
       return;
     }
     if (r == null) return;
+    if (_srCacheName(i) != paramKey) {
+      // 任务启动后用户改参：结果作废
+      r.image.dispose();
+      return;
+    }
     _storeSr(i, r.image);
     unawaited(_persistSr(i, r.image));
   }
