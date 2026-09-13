@@ -38,6 +38,7 @@ class ZipDownloadService extends ChangeNotifier {
   static final ZipDownloadService instance = ZipDownloadService._();
 
   final Map<String, ZipDownloadTask> _tasks = {}; // aid → 任务
+  final Map<String, HttpClient> _clients = {}; // aid → 在途下载客户端（取消时强杀）
   bool _pumping = false;
 
   List<ZipDownloadTask> get activeTasks => _tasks.values.toList();
@@ -69,10 +70,13 @@ class ZipDownloadService extends ChangeNotifier {
     final t = _tasks[aid];
     if (t == null) return;
     t.abort = true;
-    if (t.status == ZipDownloadStatus.queued || t.status == ZipDownloadStatus.resolving) {
-      _tasks.remove(aid);
-      notifyListeners();
-    }
+    // 立即从任务表移除（UI 即时消失），孤儿任务靠 abort 检查收尾。
+    // 强杀在途 HTTP：0% 时任务可能正等响应头或撞上死流，仅置 abort 标志
+    // 要等下一个数据块到达才被检查，表现为"点取消没反应"；force close
+    // 让所有在途 await 立即抛错走清理路径。
+    _clients.remove(aid)?.close(force: true);
+    _tasks.remove(aid);
+    notifyListeners();
   }
 
   Future<void> _pump() async {
@@ -115,7 +119,9 @@ class ZipDownloadService extends ChangeNotifier {
       await _register(task, zipPath);
     } catch (e) {
       if (task.abort) {
-        _tasks.remove(task.item.aid); // 用户取消：无残留
+        // 用户取消（cancel 可能已先移除）：无残留。按对象身份清理，
+        // 防止误删"取消后立刻重新下载"的同 aid 新任务。
+        _tasks.removeWhere((_, v) => identical(v, task));
       } else {
         task.status = ZipDownloadStatus.failed;
         task.error = '$e';
@@ -138,7 +144,7 @@ class ZipDownloadService extends ChangeNotifier {
       } catch (_) {}
       throw Exception('ZIP 校验失败（文件可能损坏）: $e');
     }
-    _tasks.remove(task.item.aid);
+    _tasks.removeWhere((_, v) => identical(v, task));
     await DownloadService.instance
         .registerZip(task.item, zipPath, count, official: true);
     AppLog.i('下载',
@@ -168,7 +174,10 @@ class ZipDownloadService extends ChangeNotifier {
         lastErr = e;
         AppLog.w('下载', '打包下载第 $attempt/$attempts 次失败 ${task.item.aid}: $e');
         if (attempt < attempts) {
-          await Future.delayed(Duration(seconds: 5 * attempt));
+          // 分段等待，取消在 1s 内即可退出退避
+          for (var w = 0; w < 5 * attempt && !task.abort; w++) {
+            await Future.delayed(const Duration(seconds: 1));
+          }
         }
       }
     }
@@ -181,6 +190,19 @@ class ZipDownloadService extends ChangeNotifier {
     final partFile = File(partPath);
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 20);
+    _clients[task.item.aid] = client; // 注册在途客户端，cancel 强杀用
+    Timer? watchdog;
+    // 无数据看门狗：等响应头阶段与 0 字节死流都收不到任何 chunk——abort
+    // 标志、minSpeed 限速检测（需先收 256KB）全都无从触发。30s 无数据
+    // 强杀连接走重试；每收到一块重置，兼顾传输中途的停滞。
+    void arm() {
+      watchdog?.cancel();
+      watchdog = Timer(const Duration(seconds: 30), () {
+        client.close(force: true);
+      });
+    }
+
+    arm();
     IOSink? sink;
     try {
       final req = await client.getUrl(Uri.parse(url));
@@ -201,6 +223,7 @@ class ZipDownloadService extends ChangeNotifier {
       var lastNotify = 0;
       await for (final chunk in res) {
         if (task.abort) throw Exception('已取消');
+        arm(); // 有数据流动：重置看门狗
         sink.add(chunk);
         task.downloaded += chunk.length;
         windowBytes += chunk.length;
@@ -240,6 +263,10 @@ class ZipDownloadService extends ChangeNotifier {
       } catch (_) {}
       rethrow;
     } finally {
+      watchdog?.cancel();
+      if (identical(_clients[task.item.aid], client)) {
+        _clients.remove(task.item.aid);
+      }
       client.close(force: true);
     }
   }

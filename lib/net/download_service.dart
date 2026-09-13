@@ -344,8 +344,9 @@ class DownloadService extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       if (task.abort) {
-        // 用户取消：直接移除，不留 failed 残留
-        _tasks.remove(task.item.aid);
+        // 用户取消：直接移除，不留 failed 残留。按对象身份清理，防止
+        // 误删"取消后立刻重新下载"的同 aid 新任务。
+        _tasks.removeWhere((_, v) => identical(v, task));
       } else {
         task.status = DownloadStatus.failed;
         task.error = '$e';
