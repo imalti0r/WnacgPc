@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 GLSLANG = "tool/glslang/bin/glslang.exe"
-SHADER_LIB = "D:/flutter/bin/cache/artifacts/engine/windows-x64/shader_lib"
+SHADER_LIB = "D:/DevEnv/flutter/bin/cache/artifacts/engine/windows-x64/shader_lib"
 
 for name in ("fsr", "a4k"):
     src = f"shaders/src/{name}.frag"
