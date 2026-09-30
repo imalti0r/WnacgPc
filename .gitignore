@@ -60,3 +60,4 @@ app.*.map.json
 /tool/migrate_plan.json
 /tool/migrate_errors.json
 __pycache__/
+agent.md
